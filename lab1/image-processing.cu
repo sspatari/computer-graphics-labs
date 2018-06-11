@@ -10,7 +10,7 @@ __device__ int clamp(int value, int lo, int hi) {
     return (value < lo ? lo : value > hi ? hi : value);
 }
 
-__global__ void img_proc(const unsigned char* IMG_IN, unsigned char* IMG_OUT, int W, int H)
+__global__ void img_proc(const unsigned char* const IMG_IN, unsigned char* const IMG_OUT, int W, int H)
 {
     /* Kernel that is executed for each pixel (x,y) in the image
      * and does the following:
@@ -38,7 +38,7 @@ __global__ void img_proc(const unsigned char* IMG_IN, unsigned char* IMG_OUT, in
     }
 }
 
-int main(void) // int argc, const char* argv[]
+int main() // int argc, const char* argv[]
 {
     unsigned char *img_in, *img_out;
     unsigned char *IMG_IN, *IMG_OUT;
@@ -69,8 +69,8 @@ int main(void) // int argc, const char* argv[]
 
     /* Launch kernel that computes result and writes it to IMG_OUT */
     dim3 threads_in_block(32, 32, 1); // Just an example; should work fine
-    dim3 blocks_in_grid(W / threads_in_block.x + (W % threads_in_block.x != 0),
-                        H / threads_in_block.y + (H % threads_in_block.y != 0), 1);
+    dim3 blocks_in_grid((W + threads_in_block.x - 1) / threads_in_block.x,
+                        (H + threads_in_block.y - 1) / threads_in_block.y, 1);
     img_proc<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
 
     /* Copy result from GPU memory to main memory */
