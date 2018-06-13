@@ -1,12 +1,21 @@
-#include <stdio.h>
-#include <stdlib.h>
-
 #include <cuda.h>
 #include <cuda_runtime.h>
 
 #include "lodepng.h"
 
-__device__ int clamp(int value, int lo, int hi) {
+#define CUDA_CHECK(E) \
+{ \
+    cudaError_t e = E ; \
+    if ( e != cudaSuccess ) { \
+        fprintf ( stderr , "%s:%d: CUDA error : %s\n", \
+                __FILE__ , __LINE__ , \
+                cudaGetErrorString ( e )); \
+        exit (1); \
+    } \
+}
+
+__device__ int clamp(int value, int lo, int hi)
+{
     return (value < lo ? lo : value > hi ? hi : value);
 }
 
@@ -38,11 +47,24 @@ __global__ void img_proc(const unsigned char* const IMG_IN, unsigned char* const
     }
 }
 
+float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
+{
+    cudaEventSynchronize(stop);
+    float milliseconds;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    return milliseconds;
+}
+
 int main() // int argc, const char* argv[]
 {
     unsigned char *img_in, *img_out;
     unsigned char *IMG_IN, *IMG_OUT;
+    unsigned short *TMP;
     int W, H;
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
 
     /* Load image into img_in array; set W and H */
     {
@@ -61,35 +83,47 @@ int main() // int argc, const char* argv[]
     }
 
     /* Allocate images on GPU */
-    cudaMalloc(&IMG_IN, W * H);
-    cudaMalloc(&IMG_OUT, W * H);
+    CUDA_CHECK(cudaMalloc(&IMG_IN, W * H));
+    CUDA_CHECK(cudaMalloc(&IMG_OUT, W * H));
 
     /* Copy img_in from main memory to GPU memory */
-    cudaMemcpy(IMG_IN, img_in, W * H, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(IMG_IN, img_in, W * H, cudaMemcpyHostToDevice));
 
-    /* Launch kernel that computes result and writes it to IMG_OUT */
+    /* Determine block and grid dimensions */
     dim3 threads_in_block(32, 32, 1); // Just an example; should work fine
     dim3 blocks_in_grid((W + threads_in_block.x - 1) / threads_in_block.x,
                         (H + threads_in_block.y - 1) / threads_in_block.y, 1);
+
+    /*
+     * Approach 1
+     */
+    /* Launch kernel that computes result and writes it to IMG_OUT */
+    cudaEventRecord(start);
     img_proc<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
+    cudaEventRecord(stop);
+    fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
 
     /* Copy result from GPU memory to main memory */
-    cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost);
-
-    /* Release GPU arrays */
-    cudaFree(IMG_IN);
-    cudaFree(IMG_OUT);
+    CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
 
     /* Save image */
     {
         std::vector<unsigned char> image(W * H);
         memcpy(&(image[0]), img_out, W * H);
-        unsigned error = lodepng::encode("img_out.png", image, W, H, LCT_GREY, 8);
+        unsigned error = lodepng::encode("img_out1.png", image, W, H, LCT_GREY, 8);
         if (error) {
             fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
             exit(1);
         }
     }
+
+    /* Destroy the events */
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    /* Release GPU arrays */
+    CUDA_CHECK(cudaFree(IMG_IN));
+    CUDA_CHECK(cudaFree(IMG_OUT));
 
     /* Release arrays */
     free(img_in);
