@@ -26,7 +26,7 @@ __global__ void img_proc(const unsigned char* const IMG_IN, unsigned char* const
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < W && y < H) {
         float avg = 0.0f;
-        for (int range1 = -2; range1 < +2; ++range1) {
+        for (int range1 = -2; range1 <= +2; ++range1) {
             int yy = clamp(y + range1, 0, H - 1);
             for (int range2 = -2; range2 <= +2; ++range2) {
                 int xx = clamp(x + range2, 0, W - 1);
