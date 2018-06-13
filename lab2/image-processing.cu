@@ -35,10 +35,10 @@ __global__ void img_proc(const unsigned char* const IMG_IN, unsigned char* const
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < W && y < H) {
         float avg = 0.0f;
-        for (int range1 = -2; range1 <= +2; ++range1) {
-            int yy = clamp(y + range1, 0, H - 1);
-            for (int range2 = -2; range2 <= +2; ++range2) {
-                int xx = clamp(x + range2, 0, W - 1);
+        for (int r1 = -2; r1 <= +2; ++r1) {
+            int yy = clamp(y + r1, 0, H - 1);
+            for (int r2 = -2; r2 <= +2; ++r2) {
+                int xx = clamp(x + r2, 0, W - 1);
                 avg += IMG_IN[yy * W + xx];
             }
         }
@@ -47,7 +47,35 @@ __global__ void img_proc(const unsigned char* const IMG_IN, unsigned char* const
     }
 }
 
-float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
+__global__ void img_proc_step_1(const unsigned char* const IMG_IN, unsigned short* const TMP, int W, int H)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < W && y < H) {
+        unsigned short tmp_sum = 0;
+        for (int r = -2; r <= +2; ++r) {
+            int xx = clamp(x + r, 0, W - 1);
+            tmp_sum += IMG_IN[y * W + xx];
+        }
+        TMP[y * W + x] = tmp_sum;
+    }
+}
+
+__global__ void img_proc_step_2(const unsigned short* const TMP, unsigned char* const IMG_OUT, int W, int H)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < W && y < H) {
+        float avg = 0.0f;
+        for (int r = -2; r <= +2; ++r) {
+            int yy = clamp(y + r, 0, H - 1);
+            avg += TMP[yy * W + x];
+        }
+        avg /= 25.0f;
+        IMG_OUT[y * W + x] = avg;
+    }
+}
+__host__ float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
 {
     cudaEventSynchronize(stop);
     float milliseconds;
@@ -111,6 +139,36 @@ int main() // int argc, const char* argv[]
         std::vector<unsigned char> image(W * H);
         memcpy(&(image[0]), img_out, W * H);
         unsigned error = lodepng::encode("img_out1.png", image, W, H, LCT_GREY, 8);
+        if (error) {
+            fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
+            exit(1);
+        }
+    }
+
+    /*
+     * Approach 2
+     */
+    /* Allocate TMP array on GPU */
+    CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
+
+    /* Launch kernel that computes result and writes it to IMG_OUT */
+    cudaEventRecord(start);
+    img_proc_step_1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, TMP, W, H);
+    img_proc_step_2<<<blocks_in_grid, threads_in_block>>>(TMP, IMG_OUT, W, H);
+    cudaEventRecord(stop);
+    fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+
+    /* Release TMP GPU array */
+    CUDA_CHECK(cudaFree(TMP));
+
+    /* Copy result from GPU memory to main memory */
+    CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
+
+    /* Save image */
+    {
+        std::vector<unsigned char> image(W * H);
+        memcpy(&(image[0]), img_out, W * H);
+        unsigned error = lodepng::encode("img_out2.png", image, W, H, LCT_GREY, 8);
         if (error) {
             fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
             exit(1);
