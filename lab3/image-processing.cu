@@ -6,13 +6,16 @@
 #define CUDA_CHECK(E) \
 { \
     cudaError_t e = E ; \
-    if ( e != cudaSuccess ) { \
-        fprintf ( stderr , "%s:%d: CUDA error : %s\n", \
-                __FILE__ , __LINE__ , \
-                cudaGetErrorString ( e )); \
-        exit (1); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "%s:%d: CUDA error : %s\n", \
+                __FILE__, __LINE__, \
+                cudaGetErrorString(e)); \
+        exit(1); \
     } \
 }
+
+#define BLOCK_SIZE 32
+#define FILTER_SIZE 5
 
 __device__ int clamp(int value, int lo, int hi)
 {
@@ -35,14 +38,14 @@ __global__ void img_proc(const unsigned char * __restrict__ IMG_IN, unsigned cha
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < W && y < H) {
         unsigned short avg = 0;
-        for (int r1 = -2; r1 <= +2; ++r1) {
+        for (int r1 = -FILTER_SIZE / 2; r1 <= FILTER_SIZE / 2; ++r1) {
             int yy = clamp(y + r1, 0, H - 1);
-            for (int r2 = -2; r2 <= +2; ++r2) {
+            for (int r2 = -FILTER_SIZE / 2; r2 <= FILTER_SIZE / 2; ++r2) {
                 int xx = clamp(x + r2, 0, W - 1);
                 avg += __ldg(IMG_IN + yy * W + xx);
             }
         }
-        avg /= 25;
+        avg /= FILTER_SIZE * FILTER_SIZE;
         IMG_OUT[y * W + x] = avg;
     }
 }
@@ -52,12 +55,12 @@ __global__ void img_proc_step_1(const unsigned char* IMG_IN, unsigned short* TMP
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < W && y < H) {
-        unsigned short tmp_sum = 0;
-        for (int r = -2; r <= +2; ++r) {
+        unsigned short sum = 0;
+        for (int r = -FILTER_SIZE / 2; r <= FILTER_SIZE / 2; ++r) {
             int xx = clamp(x + r, 0, W - 1);
-            tmp_sum += IMG_IN[y * W + xx];
+            sum += IMG_IN[y * W + xx];
         }
-        TMP[y * W + x] = tmp_sum;
+        TMP[y * W + x] = sum;
     }
 }
 
@@ -67,17 +70,17 @@ __global__ void img_proc_step_2(const unsigned short* __restrict__ TMP, unsigned
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < W && y < H) {
         unsigned short avg = 0;
-        for (int r = -2; r <= +2; ++r) {
+        for (int r = -FILTER_SIZE / 2; r <= FILTER_SIZE / 2; ++r) {
             int yy = clamp(y + r, 0, H - 1);
             avg += __ldg(TMP + yy * W + x);
         }
-        avg /= 25;
+        avg /= FILTER_SIZE * FILTER_SIZE;
         IMG_OUT[y * W + x] = avg;
     }
 }
 __host__ float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
 {
-    cudaEventSynchronize(stop);
+    cudaEventSynchronize(stop); //Wait until the completion of all device work preceding the most recent call to cudaEventRecord(stop)
     float milliseconds;
     cudaEventElapsedTime(&milliseconds, start, stop);
     return milliseconds;
@@ -118,7 +121,7 @@ int main() // int argc, const char* argv[]
     CUDA_CHECK(cudaMemcpy(IMG_IN, img_in, W * H, cudaMemcpyHostToDevice));
 
     /* Determine block and grid dimensions */
-    dim3 threads_in_block(32, 32, 1); // Just an example; should work fine
+    dim3 threads_in_block(BLOCK_SIZE, BLOCK_SIZE, 1); // Just an example; should work fine
     dim3 blocks_in_grid((W + threads_in_block.x - 1) / threads_in_block.x,
                         (H + threads_in_block.y - 1) / threads_in_block.y, 1);
 
@@ -126,11 +129,14 @@ int main() // int argc, const char* argv[]
      * Approach 1
      */
     /* Launch kernel that computes result and writes it to IMG_OUT */
-    cudaEventRecord(start);
-    img_proc<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
-    cudaEventRecord(stop);
-    fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
-
+    for (int loop = 0; loop < 2; ++loop) {
+        cudaEventRecord(start);
+        img_proc<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
+        cudaEventRecord(stop);
+        CUDA_CHECK(cudaGetLastError());
+        if(loop == 1)
+            fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+    }
     /* Copy result from GPU memory to main memory */
     CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
 
@@ -152,11 +158,15 @@ int main() // int argc, const char* argv[]
     CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
 
     /* Launch kernel that computes result and writes it to IMG_OUT */
-    cudaEventRecord(start);
-    img_proc_step_1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, TMP, W, H);
-    img_proc_step_2<<<blocks_in_grid, threads_in_block>>>(TMP, IMG_OUT, W, H);
-    cudaEventRecord(stop);
-    fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+    for (int loop = 0; loop < 2; ++loop) {
+        cudaEventRecord(start);
+        img_proc_step_1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, TMP, W, H);
+        img_proc_step_2<<<blocks_in_grid, threads_in_block>>>(TMP, IMG_OUT, W, H);
+        cudaEventRecord(stop);
+        CUDA_CHECK(cudaGetLastError());
+        if (loop == 1)
+            fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+    }
 
     /* Release TMP GPU array */
     CUDA_CHECK(cudaFree(TMP));
