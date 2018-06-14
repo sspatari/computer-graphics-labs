@@ -135,7 +135,7 @@ int main() // int argc, const char* argv[]
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if(loop == 1)
-            fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+            fprintf(stderr, "%g ms - first approach(without shared memory)\n", get_milliseconds(start, stop));
     }
     /* Copy result from GPU memory to main memory */
     CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
@@ -165,7 +165,7 @@ int main() // int argc, const char* argv[]
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if (loop == 1)
-            fprintf(stderr, "%g milliseconds\n", get_milliseconds(start, stop));
+            fprintf(stderr, "%g ms - second approach(without shared memory)\n", get_milliseconds(start, stop));
     }
 
     /* Release TMP GPU array */
