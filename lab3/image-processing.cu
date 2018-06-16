@@ -88,7 +88,7 @@ __global__ void img_proc_v3_step_1(const unsigned char* IMG_IN, unsigned short* 
     int x = blockIdx.x * inner_block_width + threadIdx.x - (FILTER_SIZE / 2);
 
     /* Part 1: save pixel values in shared memory */
-    if (x < W && y < H) {
+    if (x < W + FILTER_SIZE / 2 && y < H) {
         int xx = clamp(x, 0, W - 1);
         block_shared_mem[threadIdx.y][threadIdx.x] = IMG_IN[y * W + xx];
     }
@@ -96,7 +96,7 @@ __global__ void img_proc_v3_step_1(const unsigned char* IMG_IN, unsigned short* 
 
     if (x < W && y < H && threadIdx.x >= FILTER_SIZE / 2 && threadIdx.x < BLOCK_SIZE - FILTER_SIZE / 2) {
         unsigned short sum = 0;
-        for (int r = -FILTER_SIZE / 2; r < FILTER_SIZE / 2; ++r) {
+        for (int r = -FILTER_SIZE / 2; r <= FILTER_SIZE / 2; ++r) {
             sum += block_shared_mem[threadIdx.y][threadIdx.x + r];
         }
         TMP[y * W + x] = sum;
@@ -112,7 +112,7 @@ __global__ void img_proc_v3_step_2(const unsigned short* TMP, unsigned char* IMG
     int y = blockIdx.y * inner_block_height + threadIdx.y - (FILTER_SIZE / 2);
 
     /* Part 1: save pixel values in shared memory */
-    if (x < W && y < H) {
+    if (x < W && y < H + FILTER_SIZE / 2) {
         int yy = clamp(y, 0, H - 1);
         block_shared_mem[threadIdx.y][threadIdx.x] = TMP[yy * W + x];
     }
@@ -120,7 +120,7 @@ __global__ void img_proc_v3_step_2(const unsigned short* TMP, unsigned char* IMG
 
     if (x < W && y < H && threadIdx.y >= FILTER_SIZE / 2 && threadIdx.y < BLOCK_SIZE - FILTER_SIZE / 2) {
         unsigned short sum = 0;
-        for (int r = -FILTER_SIZE / 2; r < FILTER_SIZE / 2; ++r) {
+        for (int r = -FILTER_SIZE / 2; r <= FILTER_SIZE / 2; ++r) {
             sum += block_shared_mem[threadIdx.y + r][threadIdx.x];
         }
         IMG_OUT[y * W + x] = sum / (FILTER_SIZE * FILTER_SIZE);
@@ -234,7 +234,7 @@ int main() // int argc, const char* argv[]
     }
 
     /*
-     * Approach 2 (with shared memory)
+     * Approach 3 (with shared memory)
      */
     /* Allocate memory on GPU for TMP array */
     CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
@@ -246,7 +246,6 @@ int main() // int argc, const char* argv[]
     dim3 blocks_in_grid_3((W + threads_in_block.x - 1) / threads_in_block.x,
                         (H + inner_block_size - 1) / inner_block_size, 1);
 
-
     /* Launch kernel that computes result and writes it to IMG_OUT */
     for (int loop = 0; loop < 2; ++loop) {
         cudaEventRecord(start);
@@ -255,7 +254,7 @@ int main() // int argc, const char* argv[]
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if(loop == 1)
-            fprintf(stderr, "%g ms - second approach(with shared memory)\n", get_milliseconds(start, stop));
+            fprintf(stderr, "%g ms - third approach(second approch with shared memory)\n", get_milliseconds(start, stop));
     }
     /* Release GPU array */
     CUDA_CHECK(cudaFree(TMP));
