@@ -79,7 +79,7 @@ __global__ void img_proc_v2_step_2(const unsigned short* __restrict__ TMP, unsig
     }
 }
 
-__global__ void img_proc_v3_step_1(const unsigned char* IMG_IN, unsigned short* TMP, int W, int H)
+__global__ void img_proc_v3_step_1(const unsigned char* const __restrict__ IMG_IN, unsigned short* TMP, int W, int H)
 {
     __shared__ unsigned char block_shared_mem[BLOCK_SIZE][BLOCK_SIZE];
 
@@ -90,7 +90,7 @@ __global__ void img_proc_v3_step_1(const unsigned char* IMG_IN, unsigned short* 
     /* Part 1: save pixel values in shared memory */
     if (x < W + FILTER_SIZE / 2 && y < H) {
         int xx = clamp(x, 0, W - 1);
-        block_shared_mem[threadIdx.y][threadIdx.x] = IMG_IN[y * W + xx];
+        block_shared_mem[threadIdx.y][threadIdx.x] = __ldg(IMG_IN + y * W + xx);
     }
     __syncthreads();
 
@@ -126,6 +126,34 @@ __global__ void img_proc_v3_step_2(const unsigned short* TMP, unsigned char* IMG
         IMG_OUT[y * W + x] = sum / (FILTER_SIZE * FILTER_SIZE);
     }
 }
+
+__global__ void img_proc_v4(const unsigned char* __restrict__ IMG_IN, unsigned char* IMG_OUT, int W, int H)
+{
+    __shared__ unsigned char block_shared_mem[BLOCK_SIZE][BLOCK_SIZE];
+
+    int inner_block_size = BLOCK_SIZE - 2 * (FILTER_SIZE / 2);
+    int x = blockIdx.x * inner_block_size+ threadIdx.x - (FILTER_SIZE / 2);
+    int y = blockIdx.y * inner_block_size+ threadIdx.y - (FILTER_SIZE / 2);
+
+    /* Part 1: save pixel values in shared memory */
+    if (x < W + FILTER_SIZE / 2 && y < H + FILTER_SIZE / 2) {
+        int xx = clamp(x, 0, W - 1);
+        int yy = clamp(y, 0, H - 1);
+        block_shared_mem[threadIdx.y][threadIdx.x] = __ldg(IMG_IN + yy * W + xx);
+    }
+    __syncthreads();
+
+    if (x < W && y < H && threadIdx.x >= FILTER_SIZE / 2 && threadIdx.x < BLOCK_SIZE - FILTER_SIZE / 2 && threadIdx.y >= FILTER_SIZE / 2 && threadIdx.y < BLOCK_SIZE - FILTER_SIZE / 2) {
+        unsigned short sum = 0;
+        for (int r1 = -FILTER_SIZE / 2; r1 <= FILTER_SIZE / 2; ++r1) {
+            for (int r2 = -FILTER_SIZE / 2; r2 <= FILTER_SIZE / 2; ++r2) {
+                sum += block_shared_mem[threadIdx.y + r1][threadIdx.x + r2];
+            }
+        }
+        IMG_OUT[y * W + x] = sum / (FILTER_SIZE * FILTER_SIZE);;
+    }
+}
+
 
 __host__ float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
 {
@@ -236,29 +264,21 @@ int main() // int argc, const char* argv[]
     /*
      * Approach 3 (with shared memory)
      */
-    /* Allocate memory on GPU for TMP array */
-    CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
 
     /* Determine grid dimensions */
     int inner_block_size = BLOCK_SIZE - 2 * (FILTER_SIZE / 2);
-    dim3 blocks_in_grid_2((W + inner_block_size - 1) / inner_block_size,
-                        (H + threads_in_block.y - 1) / threads_in_block.y, 1);
-    dim3 blocks_in_grid_3((W + threads_in_block.x - 1) / threads_in_block.x,
+    dim3 blocks_in_grid_3((W + inner_block_size - 1) / inner_block_size,
                         (H + inner_block_size - 1) / inner_block_size, 1);
 
     /* Launch kernel that computes result and writes it to IMG_OUT */
     for (int loop = 0; loop < 2; ++loop) {
         cudaEventRecord(start);
-        img_proc_v3_step_1<<<blocks_in_grid_2, threads_in_block>>>(IMG_IN, TMP, W, H);
-        img_proc_v3_step_2<<<blocks_in_grid_3, threads_in_block>>>(TMP, IMG_OUT, W, H);
+        img_proc_v4<<<blocks_in_grid_3, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if(loop == 1)
-            fprintf(stderr, "%g ms - third approach(second approch with shared memory)\n", get_milliseconds(start, stop));
+            fprintf(stderr, "%g ms - third approach (approach 1 with shared memory)\n", get_milliseconds(start, stop));
     }
-    /* Release GPU array */
-    CUDA_CHECK(cudaFree(TMP));
-
     /* Copy result from GPU memory to main memory */
     CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
 
@@ -272,6 +292,47 @@ int main() // int argc, const char* argv[]
             exit(1);
         }
     }
+
+    /*
+     * Approach 4 (with shared memory)
+     */
+    /* Allocate memory on GPU for TMP array */
+    CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
+
+    /* Determine grid dimensions */
+    dim3 threads_in_block_4(BLOCK_SIZE, 1, 1); // Just an example; should work fine
+    dim3 blocks_in_grid_4_1((W + inner_block_size - 1) / inner_block_size,
+                        (H + threads_in_block_4.y - 1) / threads_in_block_4.y, 1);
+    dim3 blocks_in_grid_4_2((W + threads_in_block_4.x - 1) / threads_in_block_4.x,
+                        (H + inner_block_size - 1) / inner_block_size, 1);
+
+    /* Launch kernel that computes result and writes it to IMG_OUT */
+    for (int loop = 0; loop < 2; ++loop) {
+        cudaEventRecord(start);
+        img_proc_v3_step_1<<<blocks_in_grid_4_1, threads_in_block_4>>>(IMG_IN, TMP, W, H);
+        img_proc_v3_step_2<<<blocks_in_grid_4_2, threads_in_block_4>>>(TMP, IMG_OUT, W, H);
+        cudaEventRecord(stop);
+        CUDA_CHECK(cudaGetLastError());
+        if(loop == 1)
+            fprintf(stderr, "%g ms - forth approach (approach 2 with shared memory)\n", get_milliseconds(start, stop));
+    }
+    /* Release GPU array */
+    CUDA_CHECK(cudaFree(TMP));
+
+    /* Copy result from GPU memory to main memory */
+    CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
+
+    /* Save image */
+    {
+        std::vector<unsigned char> image(W * H);
+        memcpy(&(image[0]), img_out, W * H);
+        unsigned error = lodepng::encode("img_out4.png", image, W, H, LCT_GREY, 8);
+        if (error) {
+            fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
+            exit(1);
+        }
+    }
+
 
     /* Destroy the events */
     CUDA_CHECK(cudaEventDestroy(start));
