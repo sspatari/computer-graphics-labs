@@ -22,7 +22,7 @@ __device__ int clamp(int value, int lo, int hi)
     return (value < lo ? lo : value > hi ? hi : value);
 }
 
-__global__ void img_proc(const unsigned char * __restrict__ IMG_IN, unsigned char* IMG_OUT, int W, int H)
+__global__ void img_proc_v1(const unsigned char* __restrict__ IMG_IN, unsigned char* IMG_OUT, int W, int H)
 {
     /* Kernel that is executed for each pixel (x,y) in the image
      * and does the following:
@@ -50,7 +50,7 @@ __global__ void img_proc(const unsigned char * __restrict__ IMG_IN, unsigned cha
     }
 }
 
-__global__ void img_proc_step_1(const unsigned char* IMG_IN, unsigned short* TMP, int W, int H)
+__global__ void img_proc_v2_step_1(const unsigned char* IMG_IN, unsigned short* TMP, int W, int H)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -64,7 +64,7 @@ __global__ void img_proc_step_1(const unsigned char* IMG_IN, unsigned short* TMP
     }
 }
 
-__global__ void img_proc_step_2(const unsigned short* __restrict__ TMP, unsigned char* IMG_OUT, int W, int H)
+__global__ void img_proc_v2_step_2(const unsigned short* __restrict__ TMP, unsigned char* IMG_OUT, int W, int H)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -78,6 +78,55 @@ __global__ void img_proc_step_2(const unsigned short* __restrict__ TMP, unsigned
         IMG_OUT[y * W + x] = avg;
     }
 }
+
+__global__ void img_proc_v3_step_1(const unsigned char* IMG_IN, unsigned short* TMP, int W, int H)
+{
+    __shared__ unsigned char block_shared_mem[BLOCK_SIZE][BLOCK_SIZE];
+
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int inner_block_width = BLOCK_SIZE - 2 * (FILTER_SIZE / 2);
+    int x = blockIdx.x * inner_block_width + threadIdx.x - (FILTER_SIZE / 2);
+
+    /* Part 1: save pixel values in shared memory */
+    if (x < W && y < H) {
+        int xx = clamp(x, 0, W - 1);
+        block_shared_mem[threadIdx.y][threadIdx.x] = IMG_IN[y * W + xx];
+    }
+    __syncthreads();
+
+    if (x < W && y < H && threadIdx.x >= FILTER_SIZE / 2 && threadIdx.x < BLOCK_SIZE - FILTER_SIZE / 2) {
+        unsigned short sum = 0;
+        for (int r = -FILTER_SIZE / 2; r < FILTER_SIZE / 2; ++r) {
+            sum += block_shared_mem[threadIdx.y][threadIdx.x + r];
+        }
+        TMP[y * W + x] = sum;
+    }
+}
+
+__global__ void img_proc_v3_step_2(const unsigned short* TMP, unsigned char* IMG_OUT, int W, int H)
+{
+    __shared__ unsigned short block_shared_mem[BLOCK_SIZE][BLOCK_SIZE];
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int inner_block_height = BLOCK_SIZE - 2 * (FILTER_SIZE / 2);
+    int y = blockIdx.y * inner_block_height + threadIdx.y - (FILTER_SIZE / 2);
+
+    /* Part 1: save pixel values in shared memory */
+    if (x < W && y < H) {
+        int yy = clamp(y, 0, H - 1);
+        block_shared_mem[threadIdx.y][threadIdx.x] = TMP[yy * W + x];
+    }
+    __syncthreads();
+
+    if (x < W && y < H && threadIdx.y >= FILTER_SIZE / 2 && threadIdx.y < BLOCK_SIZE - FILTER_SIZE / 2) {
+        unsigned short sum = 0;
+        for (int r = -FILTER_SIZE / 2; r < FILTER_SIZE / 2; ++r) {
+            sum += block_shared_mem[threadIdx.y + r][threadIdx.x];
+        }
+        IMG_OUT[y * W + x] = sum / (FILTER_SIZE * FILTER_SIZE);
+    }
+}
+
 __host__ float get_milliseconds(cudaEvent_t &start, cudaEvent_t &stop)
 {
     cudaEventSynchronize(stop); //Wait until the completion of all device work preceding the most recent call to cudaEventRecord(stop)
@@ -126,12 +175,12 @@ int main() // int argc, const char* argv[]
                         (H + threads_in_block.y - 1) / threads_in_block.y, 1);
 
     /*
-     * Approach 1
+     * Approach 1 (without shared memory)
      */
     /* Launch kernel that computes result and writes it to IMG_OUT */
     for (int loop = 0; loop < 2; ++loop) {
         cudaEventRecord(start);
-        img_proc<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
+        img_proc_v1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, IMG_OUT, W, H);
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if(loop == 1)
@@ -152,23 +201,22 @@ int main() // int argc, const char* argv[]
     }
 
     /*
-     * Approach 2
+     * Approach 2 (without shared memory)
      */
-    /* Allocate TMP array on GPU */
+    /* Allocate memory on GPU for TMP array */
     CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
 
     /* Launch kernel that computes result and writes it to IMG_OUT */
     for (int loop = 0; loop < 2; ++loop) {
         cudaEventRecord(start);
-        img_proc_step_1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, TMP, W, H);
-        img_proc_step_2<<<blocks_in_grid, threads_in_block>>>(TMP, IMG_OUT, W, H);
+        img_proc_v2_step_1<<<blocks_in_grid, threads_in_block>>>(IMG_IN, TMP, W, H);
+        img_proc_v2_step_2<<<blocks_in_grid, threads_in_block>>>(TMP, IMG_OUT, W, H);
         cudaEventRecord(stop);
         CUDA_CHECK(cudaGetLastError());
         if (loop == 1)
             fprintf(stderr, "%g ms - second approach(without shared memory)\n", get_milliseconds(start, stop));
     }
-
-    /* Release TMP GPU array */
+    /* Release GPU array */
     CUDA_CHECK(cudaFree(TMP));
 
     /* Copy result from GPU memory to main memory */
@@ -179,6 +227,47 @@ int main() // int argc, const char* argv[]
         std::vector<unsigned char> image(W * H);
         memcpy(&(image[0]), img_out, W * H);
         unsigned error = lodepng::encode("img_out2.png", image, W, H, LCT_GREY, 8);
+        if (error) {
+            fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
+            exit(1);
+        }
+    }
+
+    /*
+     * Approach 2 (with shared memory)
+     */
+    /* Allocate memory on GPU for TMP array */
+    CUDA_CHECK(cudaMalloc(&TMP, W * H * sizeof(unsigned short)));
+
+    /* Determine grid dimensions */
+    int inner_block_size = BLOCK_SIZE - 2 * (FILTER_SIZE / 2);
+    dim3 blocks_in_grid_2((W + inner_block_size - 1) / inner_block_size,
+                        (H + threads_in_block.y - 1) / threads_in_block.y, 1);
+    dim3 blocks_in_grid_3((W + threads_in_block.x - 1) / threads_in_block.x,
+                        (H + inner_block_size - 1) / inner_block_size, 1);
+
+
+    /* Launch kernel that computes result and writes it to IMG_OUT */
+    for (int loop = 0; loop < 2; ++loop) {
+        cudaEventRecord(start);
+        img_proc_v3_step_1<<<blocks_in_grid_2, threads_in_block>>>(IMG_IN, TMP, W, H);
+        img_proc_v3_step_2<<<blocks_in_grid_3, threads_in_block>>>(TMP, IMG_OUT, W, H);
+        cudaEventRecord(stop);
+        CUDA_CHECK(cudaGetLastError());
+        if(loop == 1)
+            fprintf(stderr, "%g ms - second approach(with shared memory)\n", get_milliseconds(start, stop));
+    }
+    /* Release GPU array */
+    CUDA_CHECK(cudaFree(TMP));
+
+    /* Copy result from GPU memory to main memory */
+    CUDA_CHECK(cudaMemcpy(img_out, IMG_OUT, W * H, cudaMemcpyDeviceToHost));
+
+    /* Save image */
+    {
+        std::vector<unsigned char> image(W * H);
+        memcpy(&(image[0]), img_out, W * H);
+        unsigned error = lodepng::encode("img_out3.png", image, W, H, LCT_GREY, 8);
         if (error) {
             fprintf(stderr, "png encoder error %d: %s\n", error, lodepng_error_text(error));
             exit(1);
